@@ -44,6 +44,9 @@
 #include "ap_config.h"
 #include "ap_listen.h"
 #include "apr_strings.h"
+#include "mod_proxy_protocol.h"
+
+apr_port_t ssl_port = 0;
 
 module AP_MODULE_DECLARE_DATA proxy_protocol_module;
 
@@ -77,6 +80,21 @@ static int pp_hook_pre_config(apr_pool_t *pconf, apr_pool_t *plog,
                          conf);
 
     return OK;
+}
+
+static int ssl_is_https(conn_rec *c)
+{
+    if (c->local_addr->port == ssl_port) {
+        ap_log_cerror(APLOG_MARK, APLOG_DEBUG, 0, c,
+                  "ProxyProtocol: connected on sslport %hu",
+                  c->local_addr->port);
+        return 1;
+    } else {
+        ap_log_cerror(APLOG_MARK, APLOG_DEBUG, 0, c,
+                  "ProxyProtocol: connected on non-sslport %hu, sslport=%hu",
+                  c->local_addr->port, ssl_port);
+        return 0;
+    }
 }
 
 /* Similar apr_sockaddr_equal, except that it compares ports too. */
@@ -189,6 +207,30 @@ static const char *pp_enable_proxy_protocol(cmd_parms *cmd, void *config,
     return NULL;
 }
 
+static const char *pp_ssl_port(cmd_parms *cmd,
+                                 void *dconf, const char *ports)
+{
+    apr_status_t rv;
+    char *host_str;
+    char *scope_id; 
+    apr_pool_t *p = cmd->pool;
+    pp_config *conf;
+    conf = ap_get_module_config(ap_server_conf->module_config,
+                                          &proxy_protocol_module);
+    const char *err = ap_check_cmd_context(cmd, GLOBAL_ONLY);
+
+    if (err != NULL) {
+        return err;
+    }
+
+    ssl_port = atoi(ports);
+
+    if (!ssl_port)
+        return "ProxyProtocolSSLPort must be numeric";
+
+    return NULL;
+}
+
 static int pp_hook_post_config(apr_pool_t *pconf, apr_pool_t *plog,
                                apr_pool_t *ptemp, server_rec *s)
 {
@@ -216,6 +258,8 @@ static int pp_hook_post_config(apr_pool_t *pconf, apr_pool_t *plog,
 static const command_rec proxy_protocol_cmds[] = {
     AP_INIT_FLAG("ProxyProtocol", pp_enable_proxy_protocol, NULL, RSRC_CONF,
                  "Enable proxy-protocol handling (`on', `off')"),
+    AP_INIT_TAKE1("ProxyProtocolSSLPort", pp_ssl_port, NULL, RSRC_CONF,
+                  "Listen port that assumes SSL is on for mod_rewrite"),
     { NULL }
 };
 
@@ -710,6 +754,12 @@ static apr_status_t pp_input_filter(ap_filter_t *f,
     return ap_get_brigade(f->next, bb_out, mode, block, readbytes);
 }
 
+void proxy_protocol_var_register(apr_pool_t *p)
+{
+/*    APR_REGISTER_OPTIONAL_FN(proxy_protocol_var_lookup); */
+    APR_REGISTER_OPTIONAL_FN(ssl_is_https);
+}
+
 static void proxy_protocol_register_hooks(apr_pool_t *p)
 {
     /* mod_ssl is CONNECTION + 5, so we want something higher (earlier);
@@ -722,6 +772,7 @@ static void proxy_protocol_register_hooks(apr_pool_t *p)
     ap_hook_pre_connection(pp_hook_pre_connection, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_post_read_request(pp_hook_post_read_request, NULL, NULL,
                               APR_HOOK_REALLY_FIRST);
+    proxy_protocol_var_register(p);
 }
 
 /* Dispatch list for API hooks */
